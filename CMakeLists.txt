@@ -14,6 +14,8 @@ add_executable(CustomFormParentDemo
     mainwindow.cpp
     customform.h
     customform.cpp
+    formcanvas.h
+    formcanvas.cpp
 )
 
 target_link_libraries(CustomFormParentDemo PRIVATE Qt6::Widgets)

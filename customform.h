@@ -2,6 +2,8 @@
 #include <QWidget>
 #include <QPoint>
 #include <QRect>
+#include <QVector>
+#include <QLine>
 
 class QTabWidget;
 class QTableView;
@@ -40,11 +42,14 @@ private:
     void clearAncestorCursors();
     void setMouseTrackingRecursive(QWidget *w, bool on = true);
     void installCursorEventFilterRecursive(QWidget *w);
+    QRect applySnapping(const QRect &rect, QVector<QLine> *guides) const;
+    void updateGuidelines(const QVector<QLine> &guides);
 
 private:
     const int m_margin = 8;
     const int m_minw   = 260;
     const int m_minh   = 160;
+    const int m_snapThreshold = 8;
 
     DragMode m_dragMode = None;
     QPoint   m_pressGlobalPos;
