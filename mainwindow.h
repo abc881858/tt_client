@@ -2,10 +2,12 @@
 #include <QMainWindow>
 #include <QPointer>
 #include <QList>
+#include <QJsonArray>
 
 class QScrollArea;
 class QWidget;
 class CustomForm;
+class FormCanvas;
 
 class MainWindow : public QMainWindow
 {
@@ -19,13 +21,18 @@ private slots:
     void addWideComponent();
     void onFormMoved(const QRect &r);
     void onFormClose(CustomForm *f);
+    void saveLayout();
+    void loadLayout();
 
 private:
-    QWidget* container() const;
+    FormCanvas* container() const;
     void maybeExpandContainer();
+    CustomForm* createForm(const QRect &geom);
+    QJsonArray serializeForms() const;
+    void recreateFromJson(const QJsonArray &arr);
 
 private:
     QScrollArea *m_area = nullptr;
-    QWidget     *m_container = nullptr;
+    FormCanvas  *m_container = nullptr;
     QList<QPointer<CustomForm>> m_forms;
 };

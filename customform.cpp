@@ -1,4 +1,5 @@
 #include "customform.h"
+#include "formcanvas.h"
 
 #include <QApplication>
 #include <QMouseEvent>
@@ -14,6 +15,10 @@
 #include <QMenu>
 #include <QContextMenuEvent>
 #include <QTextEdit>
+#include <QVector>
+#include <QLine>
+#include <cmath>
+#include <algorithm>
 
 CustomForm::CustomForm(QWidget *parent)
     : QWidget(parent)
@@ -85,6 +90,7 @@ void CustomForm::leaveEvent(QEvent *e)
 {
     QWidget::leaveEvent(e);
     unsetCursor();
+    updateGuidelines({});
 }
 
 void CustomForm::mousePressEvent(QMouseEvent *ev)
@@ -103,6 +109,7 @@ void CustomForm::mouseMoveEvent(QMouseEvent *ev)
 
     if (m_dragMode == None) {
         updateCursorByPos(ev->pos());
+        updateGuidelines({});
         return;
     }
 
@@ -117,7 +124,7 @@ void CustomForm::mouseMoveEvent(QMouseEvent *ev)
             p.setX(std::max(pr.left(), std::min(p.x(), pr.right() - sz.width() + 1)));
             p.setY(std::max(pr.top(),  std::min(p.y(), pr.bottom()- sz.height() + 1)));
         }
-        move(p);
+        g.moveTopLeft(p);
         break;
     }
     case ResizeLeft:        g.setLeft(  g.left()   + delta.x()); break;
@@ -136,7 +143,10 @@ void CustomForm::mouseMoveEvent(QMouseEvent *ev)
     if (g.width()  < m_minw) g.setWidth(m_minw);
     if (g.height() < m_minh) g.setHeight(m_minh);
 
-    if (m_dragMode != Move) setGeometry(g);
+    QVector<QLine> guides;
+    QRect snapped = applySnapping(g, &guides);
+    setGeometry(snapped);
+    updateGuidelines(guides);
 
     // 通知父窗口更新滚动区域/容器大小
     emit moved(geometry());
@@ -147,6 +157,7 @@ void CustomForm::mouseReleaseEvent(QMouseEvent *ev)
     if (ev->button() != Qt::LeftButton) return;
     m_dragMode = None;
     unsetCursor();
+    updateGuidelines({});
     emit moved(geometry());
 }
 
@@ -186,6 +197,167 @@ void CustomForm::contextMenuEvent(QContextMenuEvent *event)
     QAction *closeAct = menu.addAction("关闭组件");
     connect(closeAct, &QAction::triggered, this, [this](){ emit requestClose(this); });
     menu.exec(event->globalPos());
+}
+
+QRect CustomForm::applySnapping(const QRect &rect, QVector<QLine> *guides) const
+{
+    QWidget *parent = parentWidget();
+    if (!parent) {
+        if (guides)
+            guides->clear();
+        return rect;
+    }
+
+    QRect result = rect;
+    QVector<QLine> lines;
+
+    const QRect parentRect = parent->rect();
+    int gridSize = 20;
+    if (auto *canvas = qobject_cast<FormCanvas*>(parent))
+        gridSize = canvas->gridSize();
+    if (gridSize <= 0)
+        gridSize = 20;
+
+    auto addUnique = [](QVector<int> &vec, int value) {
+        if (!vec.contains(value))
+            vec.append(value);
+    };
+
+    QVector<int> verticalLines;
+    QVector<int> horizontalLines;
+
+    addUnique(verticalLines, parentRect.left());
+    addUnique(verticalLines, parentRect.right());
+    addUnique(horizontalLines, parentRect.top());
+    addUnique(horizontalLines, parentRect.bottom());
+
+    if (gridSize > 0) {
+        for (int x = parentRect.left(); x <= parentRect.right(); x += gridSize)
+            addUnique(verticalLines, x);
+        for (int y = parentRect.top(); y <= parentRect.bottom(); y += gridSize)
+            addUnique(horizontalLines, y);
+    }
+
+    const auto siblings = parent->findChildren<CustomForm*>(QString(), Qt::FindDirectChildrenOnly);
+    for (CustomForm *other : siblings) {
+        if (other == this)
+            continue;
+        const QRect og = other->geometry();
+        addUnique(verticalLines, og.left());
+        addUnique(verticalLines, og.right());
+        addUnique(horizontalLines, og.top());
+        addUnique(horizontalLines, og.bottom());
+    }
+
+    struct SnapData {
+        bool matched = false;
+        int target = 0;
+        int diff = 0;
+    };
+
+    auto evaluate = [&](int value, const QVector<int> &candidates) {
+        SnapData data;
+        for (int candidate : candidates) {
+            int diff = std::abs(candidate - value);
+            if (diff <= m_snapThreshold && (!data.matched || diff < data.diff)) {
+                data.matched = true;
+                data.target = candidate;
+                data.diff = diff;
+            }
+        }
+        return data;
+    };
+
+    const bool adjustLeft   = m_dragMode == Move || m_dragMode == ResizeLeft ||
+                              m_dragMode == ResizeTopLeft || m_dragMode == ResizeBottomLeft;
+    const bool adjustRight  = m_dragMode == Move || m_dragMode == ResizeRight ||
+                              m_dragMode == ResizeTopRight || m_dragMode == ResizeBottomRight;
+    const bool adjustTop    = m_dragMode == Move || m_dragMode == ResizeTop ||
+                              m_dragMode == ResizeTopLeft || m_dragMode == ResizeTopRight;
+    const bool adjustBottom = m_dragMode == Move || m_dragMode == ResizeBottom ||
+                              m_dragMode == ResizeBottomLeft || m_dragMode == ResizeBottomRight;
+
+    if (m_dragMode == Move) {
+        SnapData leftSnap = evaluate(result.left(), verticalLines);
+        SnapData rightSnap = evaluate(result.right(), verticalLines);
+        if (leftSnap.matched || rightSnap.matched) {
+            int shiftX = 0;
+            if (leftSnap.matched && (!rightSnap.matched || leftSnap.diff <= rightSnap.diff)) {
+                shiftX = leftSnap.target - result.left();
+                lines.append(QLine(leftSnap.target, parentRect.top(), leftSnap.target, parentRect.bottom()));
+            } else if (rightSnap.matched) {
+                shiftX = rightSnap.target - result.right();
+                lines.append(QLine(rightSnap.target, parentRect.top(), rightSnap.target, parentRect.bottom()));
+            }
+            result.translate(shiftX, 0);
+        }
+
+        SnapData topSnap = evaluate(result.top(), horizontalLines);
+        SnapData bottomSnap = evaluate(result.bottom(), horizontalLines);
+        if (topSnap.matched || bottomSnap.matched) {
+            int shiftY = 0;
+            if (topSnap.matched && (!bottomSnap.matched || topSnap.diff <= bottomSnap.diff)) {
+                shiftY = topSnap.target - result.top();
+                lines.append(QLine(parentRect.left(), topSnap.target, parentRect.right(), topSnap.target));
+            } else if (bottomSnap.matched) {
+                shiftY = bottomSnap.target - result.bottom();
+                lines.append(QLine(parentRect.left(), bottomSnap.target, parentRect.right(), bottomSnap.target));
+            }
+            result.translate(0, shiftY);
+        }
+    } else {
+        if (adjustLeft) {
+            SnapData leftSnap = evaluate(result.left(), verticalLines);
+            if (leftSnap.matched) {
+                result.setLeft(leftSnap.target);
+                lines.append(QLine(leftSnap.target, parentRect.top(), leftSnap.target, parentRect.bottom()));
+            }
+        }
+        if (adjustRight) {
+            SnapData rightSnap = evaluate(result.right(), verticalLines);
+            if (rightSnap.matched) {
+                result.setRight(rightSnap.target);
+                lines.append(QLine(rightSnap.target, parentRect.top(), rightSnap.target, parentRect.bottom()));
+            }
+        }
+        if (adjustTop) {
+            SnapData topSnap = evaluate(result.top(), horizontalLines);
+            if (topSnap.matched) {
+                result.setTop(topSnap.target);
+                lines.append(QLine(parentRect.left(), topSnap.target, parentRect.right(), topSnap.target));
+            }
+        }
+        if (adjustBottom) {
+            SnapData bottomSnap = evaluate(result.bottom(), horizontalLines);
+            if (bottomSnap.matched) {
+                result.setBottom(bottomSnap.target);
+                lines.append(QLine(parentRect.left(), bottomSnap.target, parentRect.right(), bottomSnap.target));
+            }
+        }
+    }
+
+    if (result.left() < parentRect.left())
+        result.moveLeft(parentRect.left());
+    if (result.top() < parentRect.top())
+        result.moveTop(parentRect.top());
+    if (result.right() > parentRect.right())
+        result.moveRight(parentRect.right());
+    if (result.bottom() > parentRect.bottom())
+        result.moveBottom(parentRect.bottom());
+
+    if (guides)
+        *guides = lines;
+    return result;
+}
+
+void CustomForm::updateGuidelines(const QVector<QLine> &guides)
+{
+    if (auto *canvas = qobject_cast<FormCanvas*>(parentWidget())) {
+        if (guides.isEmpty())
+            canvas->clearGuidelines();
+        else
+            canvas->setGuidelines(guides);
+    }
 }
 
 CustomForm::DragMode CustomForm::hitTest(const QPoint &p) const
